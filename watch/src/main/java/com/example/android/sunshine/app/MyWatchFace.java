@@ -14,32 +14,52 @@
  * limitations under the License.
  */
 
-package com.example.android.sunshine.watch;
+package com.example.android.sunshine.app;
 
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.res.Resources;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.Typeface;
+import android.os.AsyncTask;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Message;
+import android.support.annotation.NonNull;
+import android.support.annotation.Nullable;
 import android.support.wearable.watchface.CanvasWatchFaceService;
 import android.support.wearable.watchface.WatchFaceStyle;
-import android.text.format.Time;
 import android.util.Log;
 import android.view.SurfaceHolder;
 import android.view.WindowInsets;
 
+import com.google.android.gms.common.ConnectionResult;
+import com.google.android.gms.common.api.GoogleApiClient;
+import com.google.android.gms.common.api.ResultCallback;
+import com.google.android.gms.wearable.Asset;
+import com.google.android.gms.wearable.DataApi;
+import com.google.android.gms.wearable.DataEvent;
+import com.google.android.gms.wearable.DataEventBuffer;
+import com.google.android.gms.wearable.DataItem;
+import com.google.android.gms.wearable.DataMap;
+import com.google.android.gms.wearable.DataMapItem;
+import com.google.android.gms.wearable.MessageApi;
+import com.google.android.gms.wearable.Node;
+import com.google.android.gms.wearable.NodeApi;
+import com.google.android.gms.wearable.Wearable;
+
+import java.io.InputStream;
 import java.lang.ref.WeakReference;
 import java.text.SimpleDateFormat;
 import java.util.Calendar;
-import java.util.Date;
+import java.util.List;
 import java.util.TimeZone;
 import java.util.concurrent.TimeUnit;
 
@@ -94,7 +114,7 @@ public class MyWatchFace extends CanvasWatchFaceService {
         }
     }
 
-    private class Engine extends CanvasWatchFaceService.Engine {
+    private class Engine extends CanvasWatchFaceService.Engine implements GoogleApiClient.ConnectionCallbacks, GoogleApiClient.OnConnectionFailedListener, DataApi.DataListener {
         final Handler mUpdateTimeHandler = new EngineHandler(this);
         boolean mRegisteredTimeZoneReceiver = false;
         Paint mBackgroundPaint;
@@ -102,18 +122,31 @@ public class MyWatchFace extends CanvasWatchFaceService {
         Paint mHourPaint;
         Paint mColonPaint;
         Paint mDatePaint;
+        Paint maxTPaint;
+        Paint minTPaint;
         float mColonWidth;
         static final String COLON_STRING = ":";
         boolean mAmbient;
         Calendar mCalendar;
-        Date mDate;
-        Time mTime;
+        GoogleApiClient mGoogleApiClient;
+
+        private int weather;
+        private String maxTemp;
+        private String minTemp;
+        private Bitmap wearIcon;
+
+        private static final String PATH = "/wear-weather";
+        private static final String PATH_REQ = "/wear-weather-req";
+        private static final String PATH_MAXTEMP = "maxTemp";
+        private static final String PATH_MINTEMP = "minTemp";
+        private static final String PATH_ICON = "wearIcon";
+
         SimpleDateFormat mDateFormat;
         final BroadcastReceiver mTimeZoneReceiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
-                mTime.clear(intent.getStringExtra("time-zone"));
-                mTime.setToNow();
+                mCalendar.setTimeZone(TimeZone.getDefault());
+                invalidate();
             }
         };
         int mTapCount;
@@ -151,9 +184,9 @@ public class MyWatchFace extends CanvasWatchFaceService {
             mHourPaint = createTextPaint(resources.getColor(R.color.digital_text), BOLD_TYPEFACE);
             mColonPaint = createTextPaint(resources.getColor(R.color.digital_colons));
             mDatePaint = createTextPaint(resources.getColor(R.color.digital_date));
-            mTime = new Time();
+            maxTPaint = createTextPaint(resources.getColor(R.color.digital_text), BOLD_TYPEFACE);
+            minTPaint = createTextPaint(resources.getColor(R.color.digital_text));
             mCalendar = Calendar.getInstance();
-            mDate = new Date();
             mDateFormat = new SimpleDateFormat("EEE, dd MMM yyyy");
         }
 
@@ -182,10 +215,26 @@ public class MyWatchFace extends CanvasWatchFaceService {
                 registerReceiver();
 
                 // Update time zone in case it changed while we weren't visible.
-                mTime.clear(TimeZone.getDefault().getID());
-                mTime.setToNow();
+                mCalendar.setTimeZone(TimeZone.getDefault());
+
+                if(mGoogleApiClient == null){
+                    mGoogleApiClient = new GoogleApiClient.Builder(MyWatchFace.this)
+                            .addApi(Wearable.API)
+                            .addConnectionCallbacks(this)
+                            .addOnConnectionFailedListener(this)
+                            .build();
+                }
+
+                if(!mGoogleApiClient.isConnected()){
+                    mGoogleApiClient.connect();
+                }else{
+                    reqWeatherUpdates();
+                }
             } else {
                 unregisterReceiver();
+                if(mGoogleApiClient != null && mGoogleApiClient.isConnected()){
+                    mGoogleApiClient.disconnect();
+                }
             }
 
             // Whether the timer should be running depends on whether we're visible (as well as
@@ -227,6 +276,8 @@ public class MyWatchFace extends CanvasWatchFaceService {
             mHourPaint.setTextSize(textSize);
             mColonPaint.setTextSize(textSize);
             mDatePaint.setTextSize(resources.getDimension(R.dimen.digital_date_text_size));
+            maxTPaint.setTextSize(resources.getDimension(R.dimen.digital_maxT_text_size));
+            minTPaint.setTextSize(resources.getDimension(R.dimen.digital_minT_text_size));
             mColonWidth = mColonPaint.measureText(COLON_STRING);
         }
 
@@ -261,6 +312,7 @@ public class MyWatchFace extends CanvasWatchFaceService {
                     mHourPaint.setAntiAlias(!inAmbientMode);
                     mColonPaint.setAntiAlias(!inAmbientMode);
                     mDatePaint.setAntiAlias(!inAmbientMode);
+                    maxTPaint.setAntiAlias(!inAmbientMode);
                 }
                 invalidate();
             }
@@ -306,7 +358,6 @@ public class MyWatchFace extends CanvasWatchFaceService {
         public void onDraw(Canvas canvas, Rect bounds) {
             long now = System.currentTimeMillis();
             mCalendar.setTimeInMillis(now);
-            mDate.setTime(now);
             // Show colons for the first half of each second so the colons blink on when the time
             // updates.
             mShouldDrawColons = (System.currentTimeMillis() % 1000) < 500;
@@ -319,17 +370,17 @@ public class MyWatchFace extends CanvasWatchFaceService {
             }
 
             // Draw H:MM in ambient mode or H:MM:SS in interactive mode.
-            mTime.setToNow();
+
 
 
             float x = mXOffset;
             float y = mYOffset;
             if(mAmbient){
-                String text = String.format("%d:%02d", mTime.hour, mTime.minute);
+                String text = String.format("%d:%02d", mCalendar.get(Calendar.HOUR_OF_DAY), mCalendar.get(Calendar.MINUTE));
                 canvas.drawText(text, x, y, mTextPaint);
             }else{
-                String hourString = String.format("%d", mTime.hour);
-                String minuteString = String.format("%02d", mTime.minute);
+                String hourString = String.format("%d", mCalendar.get(Calendar.HOUR_OF_DAY));
+                String minuteString = String.format("%02d", mCalendar.get(Calendar.MINUTE));
                 canvas.drawText(hourString, x, y, mHourPaint);
                 x += mHourPaint.measureText(hourString);
 
@@ -347,6 +398,19 @@ public class MyWatchFace extends CanvasWatchFaceService {
                 float mwidth = canvas.getWidth()/2;
 
                 canvas.drawLine(mwidth - 20, y, mwidth + 20, y, mDatePaint);
+                x = mXOffset;
+                y += mLineHeight;
+
+                if(maxTemp != null && minTemp != null){
+                    if(wearIcon != null){
+                        canvas.drawBitmap(wearIcon,  null, new Rect(Math.round(x),Math.round(y),Math.round(x+50),Math.round(y+50)), null);
+                    }
+                    x +=60;
+                    canvas.drawText(maxTemp, x, y, maxTPaint);
+                    x += maxTPaint.measureText(maxTemp) + 20;
+                    canvas.drawText(minTemp, x, y, minTPaint);
+                }
+
             }
 
         }
@@ -382,5 +446,108 @@ public class MyWatchFace extends CanvasWatchFaceService {
                 mUpdateTimeHandler.sendEmptyMessageDelayed(MSG_UPDATE_TIME, delayMs);
             }
         }
+
+        @Override
+        public void onConnected(@Nullable Bundle bundle) {
+            Log.i(TAG, "Googleclient connected in watch");
+            Wearable.DataApi.addListener(mGoogleApiClient, this);
+            reqWeatherUpdates();
+        }
+
+        @Override
+        public void onConnectionSuspended(int i) {
+            Log.i(TAG, "Googleclient suspended");
+        }
+
+        @Override
+        public void onConnectionFailed(@NonNull ConnectionResult connectionResult) {
+            Log.i(TAG, "Googleclient connection failed");
+        }
+
+        @Override
+        public void onDataChanged(DataEventBuffer dataEventBuffer) {
+            Log.i(TAG, "onDataChanged");
+            for (DataEvent event : dataEventBuffer) {
+                if (event.getType() == DataEvent.TYPE_CHANGED) {
+                    DataItem item = event.getDataItem();
+                    String path = item.getUri().getPath();
+
+                    if (path.equals(PATH)) {
+                        DataMap dataMap = DataMapItem.fromDataItem(item).getDataMap();
+                        maxTemp = dataMap.getString(PATH_MAXTEMP);
+                        minTemp = dataMap.getString(PATH_MINTEMP);
+                        Asset asset = dataMap.getAsset(PATH_ICON);
+                        new BitmapTask().execute(asset);
+
+                        Log.i(TAG, "Temperature is " + maxTemp + " and " + minTemp);
+                        invalidate();
+                    }
+                }
+            }
+        }
+
+        private void reqWeatherUpdates(){
+
+            Wearable.NodeApi.getConnectedNodes(mGoogleApiClient)
+                    .setResultCallback(new ResultCallback<NodeApi.GetConnectedNodesResult>() {
+                @Override
+                public void onResult(@NonNull NodeApi.GetConnectedNodesResult getConnectedNodesResult) {
+                    final List<Node> nodes = getConnectedNodesResult.getNodes();
+
+                    for (Node node : nodes) {
+                        Wearable.MessageApi.sendMessage(mGoogleApiClient, node.getId(), PATH_REQ, new byte[0])
+                                .setResultCallback(new ResultCallback<MessageApi.SendMessageResult>() {
+                                    @Override
+                                    public void onResult(@NonNull MessageApi.SendMessageResult sendMessageResult) {
+                                        if (sendMessageResult.getStatus().isSuccess()) {
+                                            Log.d(TAG, "Message successfully sent");
+                                        } else {
+                                            Log.d(TAG, "Message failed to send");
+                                        }
+                                    }
+                                });
+                    }
+                }
+            });
+        }
+
+        public class BitmapTask extends AsyncTask<Asset, Void, Bitmap >{
+
+            @Override
+            protected Bitmap doInBackground(Asset... assets) {
+                GoogleApiClient mGoogleApiClient = new GoogleApiClient.Builder(MyWatchFace.this)
+                        .addApi(Wearable.API)
+                        .build();
+                if (assets[0] == null) {
+                    throw new IllegalArgumentException("Asset must be non-null");
+                }
+                ConnectionResult result =
+                        mGoogleApiClient.blockingConnect(1000, TimeUnit.MILLISECONDS);
+                if (!result.isSuccess()) {
+                    return null;
+                }
+                // convert asset into a file descriptor and block until it's ready
+                InputStream assetInputStream = Wearable.DataApi.getFdForAsset(
+                        mGoogleApiClient, assets[0]).await().getInputStream();
+                mGoogleApiClient.disconnect();
+
+                if (assetInputStream == null) {
+                    Log.w(TAG, "Requested an unknown Asset.");
+                    return null;
+                }
+                // decode the stream into a bitmap
+                return BitmapFactory.decodeStream(assetInputStream);
+            }
+
+            @Override
+            protected void onPostExecute(Bitmap bitmap) {
+                super.onPostExecute(bitmap);
+                if(bitmap != null){
+                    wearIcon = bitmap;
+                }
+            }
+        }
     }
+
+
 }
