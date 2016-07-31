@@ -276,7 +276,9 @@ public class MyWatchFace extends CanvasWatchFaceService {
             mHourPaint.setTextSize(textSize);
             mColonPaint.setTextSize(textSize);
             mDatePaint.setTextSize(resources.getDimension(R.dimen.digital_date_text_size));
+            mDatePaint.setTextAlign(Paint.Align.CENTER);
             maxTPaint.setTextSize(resources.getDimension(R.dimen.digital_maxT_text_size));
+            maxTPaint.setTextAlign(Paint.Align.CENTER);
             minTPaint.setTextSize(resources.getDimension(R.dimen.digital_minT_text_size));
             mColonWidth = mColonPaint.measureText(COLON_STRING);
         }
@@ -371,44 +373,46 @@ public class MyWatchFace extends CanvasWatchFaceService {
 
             // Draw H:MM in ambient mode or H:MM:SS in interactive mode.
 
+            String hourString = String.format("%d", mCalendar.get(Calendar.HOUR_OF_DAY));
+            String minuteString = String.format("%02d", mCalendar.get(Calendar.MINUTE));
 
-
-            float x = mXOffset;
+            float mwidth = canvas.getWidth()/2;
+            float x1 = mwidth-(mColonWidth/2) - mHourPaint.measureText(hourString);
             float y = mYOffset;
-            if(mAmbient){
-                String text = String.format("%d:%02d", mCalendar.get(Calendar.HOUR_OF_DAY), mCalendar.get(Calendar.MINUTE));
-                canvas.drawText(text, x, y, mTextPaint);
-            }else{
-                String hourString = String.format("%d", mCalendar.get(Calendar.HOUR_OF_DAY));
-                String minuteString = String.format("%02d", mCalendar.get(Calendar.MINUTE));
-                canvas.drawText(hourString, x, y, mHourPaint);
-                x += mHourPaint.measureText(hourString);
 
+            if(mAmbient){
+                String text = hourString + ":" + minuteString;
+                canvas.drawText(text, x1, y, mTextPaint);
+            }else{
+                // Write First Line
+                float x = mwidth - (mColonWidth/2);
                 if (mShouldDrawColons) {
                     canvas.drawText(COLON_STRING, x, y, mColonPaint);
                 }
-
                 x += mColonWidth;
+                canvas.drawText(minuteString, x, y, mTextPaint);
+                canvas.drawText(hourString, x1, y, mHourPaint);
+
+                //write second line
                 y += mLineHeight;
-                canvas.drawText(minuteString, x, mYOffset, mTextPaint);
+
                 canvas.drawText(
                         mDateFormat.format(mCalendar.getTime()),
-                        mDateXOffset, y, mDatePaint);
-                y += mLineHeight;
-                float mwidth = canvas.getWidth()/2;
+                        mwidth, y, mDatePaint);
+                y += mLineHeight/2;
+
 
                 canvas.drawLine(mwidth - 20, y, mwidth + 20, y, mDatePaint);
-                x = mXOffset;
-                y += mLineHeight;
+                x = canvas.getWidth()/3;
+                y += mLineHeight/2;
 
                 if(maxTemp != null && minTemp != null){
                     if(wearIcon != null){
-                        canvas.drawBitmap(wearIcon,  null, new Rect(Math.round(x),Math.round(y),Math.round(x+50),Math.round(y+50)), null);
+                        canvas.drawBitmap(wearIcon,  null, new Rect(Math.round(x-72),Math.round(y),Math.round(x),Math.round(y+72)), null);
                     }
-                    x +=60;
-                    canvas.drawText(maxTemp, x, y, maxTPaint);
-                    x += maxTPaint.measureText(maxTemp) + 20;
-                    canvas.drawText(minTemp, x, y, minTPaint);
+                    y += mLineHeight;
+                    canvas.drawText(maxTemp, mwidth, y, maxTPaint);
+                    canvas.drawText(minTemp, 2*x , y, minTPaint);
                 }
 
             }
